@@ -1,3 +1,6 @@
 pyrofork 
 google-generativeai 
 pillow
+pyrogram
+tgcrypto
+requests
