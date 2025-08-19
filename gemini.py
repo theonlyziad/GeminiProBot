@@ -1,15 +1,24 @@
+"""
+Author: Bisnu Ray (معدل بواسطة Ziad)
+Telegram: https://t.me/SmartBisnuBio
+"""
+
 import os
 import io
 import time
 import logging
+import requests
+import asyncio
 import PIL.Image
 from pyrogram.types import Message
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
 import google.generativeai as genai
 
+# استدعاء بيانات الكونفيغ
 from config import API_ID, API_HASH, BOT_TOKEN, GOOGLE_API_KEY, MODEL_NAME
 
+# إعداد البوت
 app = Client(
     "gemini_session",
     api_id=API_ID,
@@ -18,72 +27,142 @@ app = Client(
     parse_mode=ParseMode.MARKDOWN
 )
 
+# إعداد Gemini SDK للنصوص والصور
 genai.configure(api_key=GOOGLE_API_KEY)
-client = genai.Client()
+model = genai.GenerativeModel(MODEL_NAME)
 
+# إعدادات Veo 3
+VEO_MODEL = "veo-3.0-generate-preview"
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{VEO_MODEL}:generateVideo?key={GOOGLE_API_KEY}"
+
+# ============== TEXT HANDLER ==============
 @app.on_message(filters.command("gem"))
-async def gemi_handler(client_app, message: Message):
-    loading = await message.reply_text("**Generating response, please wait...**")
+async def gemi_handler(client: Client, message: Message):
+    loading_message = await message.reply_text("**Generating response, please wait...**")
     try:
         if len(message.text.strip()) <= 5:
             await message.reply_text("**Provide a prompt after the command.**")
             return
-        prompt = message.text.split(maxsplit=1)[1]
-        # Generate text as before
-        response = client.models.generate_text(model=MODEL_NAME, prompt=prompt)
-        await message.reply_text(response.text)
-    except Exception as e:
-        await message.reply_text(f"**Error: {e}**")
-    finally:
-        await loading.delete()
 
-@app.on_message(filters.command("veo"))
-async def veo_handler(client_app, message: Message):
-    loading = await message.reply_text("**Generating video, please wait...**")
-    try:
-        if len(message.text.strip()) <= 4:
-            await message.reply_text("**Provide a prompt after the command.**")
-            return
         prompt = message.text.split(maxsplit=1)[1]
-        operation = client.models.generate_videos(
-            model="veo-3.0-generate-preview",
-            prompt=prompt
-        )
-        while not operation.done:
-            await asyncio.sleep(5)
-            operation = client.operations.get(operation)
-        video_url = operation.result.video_url  # مثال افتراضي
-        await message.reply_video(video_url)
-    except Exception as e:
-        await message.reply_text(f"**Error: {e}**")
-    finally:
-        await loading.delete()
+        response = model.generate_content(prompt)
+        response_text = response.text
 
-@app.on_message(filters.command("imgveo"))
-async def imgveo_handler(client_app, message: Message):
-    loading = await message.reply_text("**Generating image-to-video, please wait...**")
+        if len(response_text) > 4000:
+            parts = [response_text[i:i + 4000] for i in range(0, len(response_text), 4000)]
+            for part in parts:
+                await message.reply_text(part)
+        else:
+            await message.reply_text(response_text)
+
+    except Exception as e:
+        await message.reply_text(f"**An error occurred: {str(e)}**")
+    finally:
+        await loading_message.delete()
+
+# ============== IMAGE HANDLER ==============
+@app.on_message(filters.command("imgai"))
+async def generate_from_image(client: Client, message: Message):
+    if not message.reply_to_message or not message.reply_to_message.photo:
+        await message.reply_text("**Please reply to a photo for a response.**")
+        return
+
+    prompt = message.command[1] if len(message.command) > 1 else message.reply_to_message.caption or "Describe this image."
+    processing_message = await message.reply_text("**Generating response, please wait...**")
+
     try:
-        if not message.reply_to_message or not message.reply_to_message.photo:
-            await message.reply_text("**Reply to a photo and include prompt.**")
-            return
-        prompt = message.command[1] if len(message.command) > 1 else message.reply_to_message.caption or ""
-        img_data = await client_app.download_media(message.reply_to_message, in_memory=True)
+        img_data = await client.download_media(message.reply_to_message, in_memory=True)
         img = PIL.Image.open(io.BytesIO(img_data.getbuffer()))
-        operation = client.models.generate_videos(
-            model="veo-3.0-generate-preview",
-            prompt=prompt,
-            image=img
-        )
-        while not operation.done:
+
+        response = model.generate_content([prompt, img])
+        response_text = response.text
+
+        await message.reply_text(response_text, parse_mode=None)
+    except Exception as e:
+        logging.error(f"Error during image analysis: {e}")
+        await message.reply_text("**An error occurred. Please try again.**")
+    finally:
+        await processing_message.delete()
+
+# ============== VEO 3: TEXT → VIDEO ==============
+@app.on_message(filters.command("veo"))
+async def veo_handler(client: Client, message: Message):
+    if len(message.text.strip().split()) < 2:
+        await message.reply_text("**Provide a prompt after the command.**")
+        return
+
+    prompt = message.text.split(maxsplit=1)[1]
+    loading = await message.reply_text("🎬 **Generating video with Veo 3... Please wait**")
+
+    try:
+        payload = {
+            "prompt": {"text": prompt}
+        }
+        r = requests.post(GEMINI_URL, json=payload)
+        r.raise_for_status()
+        result = r.json()
+        operation_name = result["name"]
+
+        # Polling لغاية ما يجهز الفيديو
+        while True:
+            status = requests.get(
+                f"https://generativelanguage.googleapis.com/v1beta/{operation_name}?key={GOOGLE_API_KEY}"
+            ).json()
+
+            if "done" in status and status["done"]:
+                video_url = status["response"]["video"]["uri"]
+                await message.reply_video(video_url, caption="🎬 Generated by Veo 3")
+                break
+
             await asyncio.sleep(5)
-            operation = client.operations.get(operation)
-        video_url = operation.result.video_url
-        await message.reply_video(video_url)
+
+    except Exception as e:
+        await message.reply_text(f"**Error: {e}**")
+    finally:
+        await loading.delete()
+
+# ============== VEO 3: IMAGE → VIDEO ==============
+@app.on_message(filters.command("imgveo"))
+async def imgveo_handler(client: Client, message: Message):
+    if not message.reply_to_message or not message.reply_to_message.photo:
+        await message.reply_text("**Reply to a photo and include a prompt.**")
+        return
+
+    prompt = message.command[1] if len(message.command) > 1 else message.reply_to_message.caption or ""
+    loading = await message.reply_text("🎬 **Generating image-to-video with Veo 3... Please wait**")
+
+    try:
+        img_data = await client.download_media(message.reply_to_message, in_memory=True)
+        b64_img = io.BytesIO(img_data.getbuffer()).getvalue()
+
+        payload = {
+            "prompt": {"text": prompt},
+            "image": {"bytesBase64": b64_img.decode("latin1")}  # ⚠️ حسب التوثيق لازم base64
+        }
+        r = requests.post(GEMINI_URL, json=payload)
+        r.raise_for_status()
+        result = r.json()
+        operation_name = result["name"]
+
+        # Polling
+        while True:
+            status = requests.get(
+                f"https://generativelanguage.googleapis.com/v1beta/{operation_name}?key={GOOGLE_API_KEY}"
+            ).json()
+
+            if "done" in status and status["done"]:
+                video_url = status["response"]["video"]["uri"]
+                await message.reply_video(video_url, caption="🎬 Image-to-Video by Veo 3")
+                break
+
+            await asyncio.sleep(5)
+
     except Exception as e:
         logging.error(f"Error: {e}")
         await message.reply_text("**An error occurred. Please try again.**")
     finally:
         await loading.delete()
+
 
 if __name__ == '__main__':
     app.run()
