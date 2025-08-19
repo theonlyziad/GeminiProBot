@@ -1,16 +1,13 @@
-"""
-Author: Bisnu Ray
-Telegram: https://t.me/SmartBisnuBio
-"""
-
 import os
 import io
+import time
 import logging
 import PIL.Image
 from pyrogram.types import Message
-import google.generativeai as genai
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
+import google.generativeai as genai
+
 from config import API_ID, API_HASH, BOT_TOKEN, GOOGLE_API_KEY, MODEL_NAME
 
 app = Client(
@@ -22,60 +19,71 @@ app = Client(
 )
 
 genai.configure(api_key=GOOGLE_API_KEY)
-
-model = genai.GenerativeModel(MODEL_NAME)
+client = genai.Client()
 
 @app.on_message(filters.command("gem"))
-async def gemi_handler(client: Client, message: Message):
-    loading_message = None
+async def gemi_handler(client_app, message: Message):
+    loading = await message.reply_text("**Generating response, please wait...**")
     try:
-        loading_message = await message.reply_text("**Generating response, please wait...**")
-
         if len(message.text.strip()) <= 5:
             await message.reply_text("**Provide a prompt after the command.**")
             return
-
         prompt = message.text.split(maxsplit=1)[1]
-        response = model.generate_content(prompt)
-
-        response_text = response.text
-        if len(response_text) > 4000:
-            parts = [response_text[i:i + 4000] for i in range(0, len(response_text), 4000)]
-            for part in parts:
-                await message.reply_text(part)
-        else:
-            await message.reply_text(response_text)
-
+        # Generate text as before
+        response = client.models.generate_text(model=MODEL_NAME, prompt=prompt)
+        await message.reply_text(response.text)
     except Exception as e:
-        await message.reply_text(f"**An error occurred: {str(e)}**")
+        await message.reply_text(f"**Error: {e}**")
     finally:
-        if loading_message:
-            await loading_message.delete()
+        await loading.delete()
 
-@app.on_message(filters.command("imgai"))
-async def generate_from_image(client: Client, message: Message):
-    if not message.reply_to_message or not message.reply_to_message.photo:
-        await message.reply_text("**Please reply to a photo for a response.**")
-        return
-
-    prompt = message.command[1] if len(message.command) > 1 else message.reply_to_message.caption or "Describe this image."
-
-    processing_message = await message.reply_text("**Generating response, please wait...**")
-
+@app.on_message(filters.command("veo"))
+async def veo_handler(client_app, message: Message):
+    loading = await message.reply_text("**Generating video, please wait...**")
     try:
-        img_data = await client.download_media(message.reply_to_message, in_memory=True)
-        img = PIL.Image.open(io.BytesIO(img_data.getbuffer()))
-
-        response = model.generate_content([prompt, img])
-        response_text = response.text
-
-        await message.reply_text(response_text, parse_mode=None)
+        if len(message.text.strip()) <= 4:
+            await message.reply_text("**Provide a prompt after the command.**")
+            return
+        prompt = message.text.split(maxsplit=1)[1]
+        operation = client.models.generate_videos(
+            model="veo-3.0-generate-preview",
+            prompt=prompt
+        )
+        while not operation.done:
+            await asyncio.sleep(5)
+            operation = client.operations.get(operation)
+        video_url = operation.result.video_url  # مثال افتراضي
+        await message.reply_video(video_url)
     except Exception as e:
-        logging.error(f"Error during image analysis: {e}")
+        await message.reply_text(f"**Error: {e}**")
+    finally:
+        await loading.delete()
+
+@app.on_message(filters.command("imgveo"))
+async def imgveo_handler(client_app, message: Message):
+    loading = await message.reply_text("**Generating image-to-video, please wait...**")
+    try:
+        if not message.reply_to_message or not message.reply_to_message.photo:
+            await message.reply_text("**Reply to a photo and include prompt.**")
+            return
+        prompt = message.command[1] if len(message.command) > 1 else message.reply_to_message.caption or ""
+        img_data = await client_app.download_media(message.reply_to_message, in_memory=True)
+        img = PIL.Image.open(io.BytesIO(img_data.getbuffer()))
+        operation = client.models.generate_videos(
+            model="veo-3.0-generate-preview",
+            prompt=prompt,
+            image=img
+        )
+        while not operation.done:
+            await asyncio.sleep(5)
+            operation = client.operations.get(operation)
+        video_url = operation.result.video_url
+        await message.reply_video(video_url)
+    except Exception as e:
+        logging.error(f"Error: {e}")
         await message.reply_text("**An error occurred. Please try again.**")
     finally:
-        await processing_message.delete()
-
+        await loading.delete()
 
 if __name__ == '__main__':
     app.run()
