@@ -98,15 +98,20 @@ async def veo_handler(client: Client, message: Message):
         payload = {
             "prompt": {"text": prompt}
         }
-        r = requests.post(GEMINI_URL, json=payload)
+
+        # إرسال طلب إنشاء الفيديو
+        r = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{VEO_MODEL}:generateVideo?key={GOOGLE_API_KEY}",
+            json=payload
+        )
         r.raise_for_status()
         result = r.json()
-        operation_name = result["name"]
+        operation_name = result["name"]  # ID للعملية
 
-        # Polling لغاية ما يجهز الفيديو
+        # متابعة العملية لحد ما تخلص
         while True:
             status = requests.get(
-                f"https://generativelanguage.googleapis.com/v1beta/{operation_name}?key={GOOGLE_API_KEY}"
+                f"https://generativelanguage.googleapis.com/v1beta/operations/{operation_name}?key={GOOGLE_API_KEY}"
             ).json()
 
             if "done" in status and status["done"]:
@@ -118,48 +123,6 @@ async def veo_handler(client: Client, message: Message):
 
     except Exception as e:
         await message.reply_text(f"**Error: {e}**")
-    finally:
-        await loading.delete()
-
-# ============== VEO 3: IMAGE → VIDEO ==============
-@app.on_message(filters.command("imgveo"))
-async def imgveo_handler(client: Client, message: Message):
-    if not message.reply_to_message or not message.reply_to_message.photo:
-        await message.reply_text("**Reply to a photo and include a prompt.**")
-        return
-
-    prompt = message.command[1] if len(message.command) > 1 else message.reply_to_message.caption or ""
-    loading = await message.reply_text("🎬 **Generating image-to-video with Veo 3... Please wait**")
-
-    try:
-        img_data = await client.download_media(message.reply_to_message, in_memory=True)
-        b64_img = io.BytesIO(img_data.getbuffer()).getvalue()
-
-        payload = {
-            "prompt": {"text": prompt},
-            "image": {"bytesBase64": b64_img.decode("latin1")}  # ⚠️ حسب التوثيق لازم base64
-        }
-        r = requests.post(GEMINI_URL, json=payload)
-        r.raise_for_status()
-        result = r.json()
-        operation_name = result["name"]
-
-        # Polling
-        while True:
-            status = requests.get(
-                f"https://generativelanguage.googleapis.com/v1beta/{operation_name}?key={GOOGLE_API_KEY}"
-            ).json()
-
-            if "done" in status and status["done"]:
-                video_url = status["response"]["video"]["uri"]
-                await message.reply_video(video_url, caption="🎬 Image-to-Video by Veo 3")
-                break
-
-            await asyncio.sleep(5)
-
-    except Exception as e:
-        logging.error(f"Error: {e}")
-        await message.reply_text("**An error occurred. Please try again.**")
     finally:
         await loading.delete()
 
