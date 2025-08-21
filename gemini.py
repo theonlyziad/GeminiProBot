@@ -33,10 +33,13 @@ from config import API_ID, API_HASH, BOT_TOKEN, GOOGLE_API_KEY, MODEL_NAME
 
 DATA_FILE = "users.json"      # قاعدة البيانات
 API_BASE_TXT2VIDEO = "https://api.yabes-desu.workers.dev/ai/tool/txt2video"
-DEV_USERNAME = "theonlyziad"  # الأدمن الوحيد
+DEV_USERNAME_CONTACT = "theonlyziad"  # لزر الشراء بعد نهاية المجاني
 DEV_MENTION = "@theonlyziad"
 BRAND_PREFIX = "zeedtek"      # بادئة الأكواد
 FREE_DAYS_DEFAULT = 3         # عدد أيام الفترة المجانية بدءاً من أول تشغيل
+
+# المالك الوحيد (ID ثابت كما طلبت)
+OWNER_ID = 5000510953
 
 # ------------------ لوجينغ ------------------
 logging.basicConfig(
@@ -55,7 +58,7 @@ def _init_db():
         # يحدد free_start وقت أول تشغيل ويخزن
         data = {
             "premium": {},        # { user_id: expiry_ts }
-            "codes": {},          # { code: seconds }
+            "codes": {},          # { code: {grant_seconds, expires_at, redeemed} }
             "free_start": int(time.time())  # بداية الفترة المجانية من أول تشغيل
         }
         _save_db(data)
@@ -109,7 +112,8 @@ def parse_duration(token: str) -> int:
     raise ValueError("صيغة المدة غير صحيحة. استعمل 1Mn / 1H / 1d")
 
 def is_admin(msg: Message) -> bool:
-    return (msg.from_user and (msg.from_user.username or "").lower() == DEV_USERNAME.lower())
+    # التحقق بالـ ID (أكثر أمانًا)
+    return bool(msg.from_user and msg.from_user.id == OWNER_ID)
 
 def now_utc() -> datetime:
     return datetime.utcnow()
@@ -190,9 +194,9 @@ async def help_handler(_, m: Message):
         "• `/veo <وصف>` — إنشاء فيديو 🎬\n"
         "• `/redeem <code>` — تفعيل كود 🎟️ (يبدأ بـ zeedtek)\n"
         "• `/myplan` أو `/status` — معرفة حالتك والمدة المتبقية ⏳\n\n"
-        "🔧 **أوامر الأدمن (فقط @theonlyziad):**\n"
+        "🔧 **أوامر الأدمن (ID فقط 5000510953):**\n"
         "• `/add <user_id> <مدة>` — إضافة بريميوم (1Mn / 1H / 1d)\n"
-        "• `/gen <مدة>` — توليد كود بريميوم (1Mn / 1H / 1d)\n"
+        "• `/gen <مدة_البريميوم> [مدة_صلاحية_الكود]` — توليد كود بريميوم (صلاحية الكود افتراضيًا 7d)\n"
         "• `/free_status` — حالة الفترة المجانية\n\n"
         "👨‍💻 Dev: @zeedtek"
     )
@@ -220,7 +224,6 @@ async def ai_image_handler(_, m: Message):
     if not m.reply_to_message or not (m.reply_to_message.photo or m.reply_to_message.document):
         await m.reply_text("**📸 استخدم `/ai` بالرد على صورة (مع وصف اختياري في نفس الأمر).**")
         return
-    prompt = None
     if len(m.command) > 1:
         prompt = " ".join(m.command[1:])
     elif m.reply_to_message.caption:
@@ -244,7 +247,6 @@ async def veo_handler(_, m: Message):
         await m.reply_text("📝 اكتب وصف الفيديو بعد الأمر: `/veo a boy running in the rain cinematic 4k`", quote=True)
         return
 
-    user_id = str(m.from_user.id)
     prompt = " ".join(m.command[1:])
     free_start, free_end = get_free_window()
 
@@ -266,7 +268,7 @@ async def veo_handler(_, m: Message):
             except: pass
     else:
         btn = InlineKeyboardMarkup([
-            [InlineKeyboardButton("💎 تواصل للشراء", url=f"https://t.me/{DEV_USERNAME}")]
+            [InlineKeyboardButton("💎 تواصل للشراء", url=f"https://t.me/{DEV_USERNAME_CONTACT}")]
         ])
         await m.reply_text(
             "🚫 انتهت الفترة المجانية لصنع الفيديوهات.\n"
@@ -277,7 +279,6 @@ async def veo_handler(_, m: Message):
 # ------------------ /myplan و /status ------------------
 @app.on_message(filters.command(["myplan", "status"]))
 async def myplan_handler(_, m: Message):
-    uid = str(m.from_user.id)
     exp_dt = premium_expiry_dt(m.from_user.id)
     free_start, free_end = get_free_window()
 
@@ -358,18 +359,38 @@ async def gen_handler(_, m: Message):
     if not is_admin(m):
         return
     try:
-        # /gen <duration>
-        _, dur = m.text.strip().split(maxsplit=1)
-        seconds = parse_duration(dur)
+        # صيغ مدعومة:
+        # /gen <مدة_البريميوم>
+        # /gen <مدة_البريميوم> <مدة_صلاحية_الكود>
+        parts = m.text.strip().split()
+        if len(parts) < 2:
+            raise ValueError("الصيغة: /gen <مدة_البريميوم> [مدة_صلاحية_الكود]")
+
+        grant_token = parts[1]              # مدة البريميوم للمستفيد (مثال: 1H)
+        grant_seconds = parse_duration(grant_token)
+
+        # صلاحية الكود نفسه (افتراضي 7 أيام)
+        validity_seconds = parse_duration(parts[2]) if len(parts) >= 3 else 7 * 86400
+
         code = BRAND_PREFIX + ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
-        db["codes"][code] = seconds
+        db["codes"][code] = {
+            "grant_seconds": int(grant_seconds),
+            "expires_at": int(time.time()) + int(validity_seconds),
+            "redeemed": False
+        }
         _save_db(db)
+
+        exp_human = humanize_seconds(validity_seconds)
+        grant_human = humanize_seconds(grant_seconds)
         await m.reply_text(
-            f"🎟️ كود جديد:\n`{code}`\n"
-            f"⏳ يمنح: **{humanize_seconds(seconds)}**",
+            "🎟️ كود جديد:\n"
+            f"`{code}`\n"
+            f"🎁 يمنح: **{grant_human}** بريميوم\n"
+            f"⏳ صالح لمدة: **{exp_human}** من الآن",
+            quote=True
         )
     except ValueError as ve:
-        await m.reply_text(f"❌ {ve}\nمثال: `/gen 1H`", quote=True)
+        await m.reply_text(f"❌ {ve}\nأمثلة:\n`/gen 1H`\n`/gen 1d 2d`", quote=True)
     except Exception as e:
         log.exception("/gen error")
         await m.reply_text(f"⚠️ خطأ: `{e}`", quote=True)
@@ -385,26 +406,41 @@ async def redeem_handler(_, m: Message):
             await m.reply_text("❌ الكود غير صالح. يجب أن يبدأ بـ `zeedtek`.", quote=True)
             return
 
-        seconds = db["codes"].get(code)
-        if not seconds:
+        info = db["codes"].get(code)
+        if not info:
             await m.reply_text("❌ الكود غير موجود أو تم استخدامه مسبقاً.", quote=True)
+            return
+
+        if info.get("redeemed"):
+            await m.reply_text("⚠️ هذا الكود تم استخدامه مسبقاً.", quote=True)
+            return
+
+        if time.time() > info.get("expires_at", 0):
+            await m.reply_text("⏰ انتهت صلاحية هذا الكود.", quote=True)
+            # يمكنك حذف الكود المنتهي تلقائياً إن رغبت
+            return
+
+        grant_seconds = int(info.get("grant_seconds", 0))
+        if grant_seconds <= 0:
+            await m.reply_text("⚠️ هذا الكود لا يحتوي مدة صالحة.", quote=True)
             return
 
         uid = str(m.from_user.id)
         exp_old_ts = db["premium"].get(uid, 0)
         base_ts = exp_old_ts if exp_old_ts and exp_old_ts > time.time() else time.time()
-        new_exp_ts = int(base_ts + int(seconds))
+        new_exp_ts = int(base_ts + grant_seconds)
         db["premium"][uid] = new_exp_ts
-        # حذف الكود حتى لا يُستخدم مرة أخرى
-        del db["codes"][code]
+
+        # علّم الكود كمستخدم
+        db["codes"][code]["redeemed"] = True
         _save_db(db)
 
         remaining = new_exp_ts - int(time.time())
         exp_dt = datetime.utcfromtimestamp(new_exp_ts)
         await m.reply_text(
             "✅ تم تفعيل Premium لك!\n"
-            f"⏳ المدة المضافة: **{humanize_seconds(seconds)}**\n"
-            f"⏳ المدة المتبقية الآن: **{humanize_seconds(remaining)}**\n"
+            f"🎁 المدة المضافة: **{humanize_seconds(grant_seconds)}**\n"
+            f"⏳ المتبقي الآن: **{humanize_seconds(remaining)}**\n"
             f"📅 ينتهي في: **{exp_dt.strftime('%Y-%m-%d %H:%M:%S')} UTC**",
             quote=True
         )
